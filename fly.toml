@@ -2,35 +2,17 @@ app = "fireflies-summary-bot"
 primary_region = "iad"
 
 [build]
-  dockerfile = "Dockerfile"
 
 [env]
   PORT = "8080"
-  PYTHON_VERSION = "3.11"
 
-[services]
+[http_service]
   internal_port = 8080
-  protocol = "tcp"
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
   
-  [[services.ports]]
-    port = 80
-    handlers = ["http"]
-    
-  [[services.ports]]
-    port = 443
-    handlers = ["tls", "http"]
-    
-  [services.concurrency]
+  [http_service.concurrency]
     type = "connections"
     hard_limit = 25
     soft_limit = 20
-
-[[services.http_checks]]
-  interval = "15s"
-  timeout = "2s"
-  grace_period = "5s"
-  method = "GET"
-  path = "/health"
-
-[processes]
-  app = "python -m src.bot"
