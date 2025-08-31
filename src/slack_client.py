@@ -55,6 +55,16 @@ class SlackBot:
             elif command_text.startswith("unsubscribe"):
                 meeting_series = command_text.replace("unsubscribe", "").strip()
                 await respond(f"Unsubscribed from meeting series: {meeting_series}")
+            elif command_text == "test":
+                # Добавляем команду тестирования
+                await respond("🧪 Запускаю тест бота... Проверяю календарь и Fireflies...")
+                # Здесь можно добавить вызов тестовой функции
+            elif command_text.startswith("test-meeting"):
+                meeting_name = command_text.replace("test-meeting", "").strip()
+                if meeting_name:
+                    await respond(f"🔍 Тестирую поиск саммари для встречи: '{meeting_name}'...")
+                else:
+                    await respond("❌ Укажите название встречи: `/fireflies-summary test-meeting UA daily sync`")
             else:
                 await respond("Unknown command. Use `/fireflies-summary help` for available commands.")
     
@@ -282,10 +292,16 @@ class SlackBot:
 Available commands:
 • `/fireflies-summary help` - Show this help message
 • `/fireflies-summary status` - Show bot status
+• `/fireflies-summary test` - Test bot functionality (calendar + Fireflies)
+• `/fireflies-summary test-meeting [name]` - Test summary search for specific meeting
 • `/fireflies-summary subscribe [meeting-series]` - Subscribe to a meeting series
 • `/fireflies-summary unsubscribe [meeting-series]` - Unsubscribe from a meeting series
 
 The bot will automatically send you summaries from previous meetings 30 minutes before your scheduled meetings.
+
+Examples:
+• `/fireflies-summary test-meeting UA daily sync`
+• `/fireflies-summary test-meeting All Hands`
         """
     
     def _get_status_message(self) -> str:

@@ -63,7 +63,8 @@ class GoogleCalendarClient:
                 async with session.get(
                     self.api_url, 
                     params={'hours': 2},  # Запрашиваем на 2 часа для большей надежности
-                    timeout=aiohttp.ClientTimeout(total=30)
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=True  # Разрешаем редиректы для Google Apps Script
                 ) as response:
                     response.raise_for_status()
                     data = await response.json()
@@ -136,7 +137,8 @@ class GoogleCalendarClient:
                         'action': 'series',
                         'seriesName': series_name
                     },
-                    timeout=aiohttp.ClientTimeout(total=30)
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=True
                 ) as response:
                     response.raise_for_status()
                     data = await response.json()
@@ -161,7 +163,8 @@ class GoogleCalendarClient:
                 async with session.get(
                     self.api_url,
                     params={'action': 'recurring'},
-                    timeout=aiohttp.ClientTimeout(total=30)
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=True
                 ) as response:
                     response.raise_for_status()
                     data = await response.json()
@@ -195,7 +198,8 @@ class GoogleCalendarClient:
                 async with session.get(
                     self.api_url, 
                     params={'action': 'all'},
-                    timeout=aiohttp.ClientTimeout(total=30)
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=True
                 ) as response:
                     response.raise_for_status()
                     data = await response.json()
@@ -237,6 +241,70 @@ class GoogleCalendarClient:
         
         return series_name
     
+    async def get_upcoming_events(self, minutes_ahead: int = 30) -> List[Dict]:
+        """
+        Получает все предстоящие встречи в указанном временном диапазоне
+        
+        Args:
+            minutes_ahead: За сколько минут вперед искать встречи
+            
+        Returns:
+            Список предстоящих встреч
+        """
+        try:
+            hours_ahead = max(2, int(minutes_ahead / 60))  # Минимум 2 часа
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self.api_url, 
+                    params={'hours': hours_ahead},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=True
+                ) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+            
+            if not data.get('success', True):
+                logger.error(f"API вернул ошибку: {data.get('error')}")
+                return []
+            
+            upcoming_events = []
+            now = datetime.now(timezone.utc)
+            
+            for event in data.get('events', []):
+                try:
+                    # Парсим время начала
+                    start_str = event.get('startTime', '')
+                    if not start_str:
+                        continue
+                        
+                    if start_str.endswith('Z'):
+                        start_time = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+                    else:
+                        start_time = datetime.fromisoformat(start_str)
+                        if start_time.tzinfo is None:
+                            start_time = start_time.replace(tzinfo=timezone.utc)
+                    
+                    # Включаем все будущие встречи в указанном диапазоне
+                    time_until_seconds = (start_time - now).total_seconds()
+                    time_until_minutes = time_until_seconds / 60
+                    
+                    if 0 < time_until_minutes <= minutes_ahead:
+                        event['minutes_until_start'] = int(time_until_minutes)
+                        event['seconds_until_start'] = int(time_until_seconds)
+                        upcoming_events.append(event)
+                        logger.info(f"Найдена предстоящая встреча '{event.get('title', 'Без названия')}' через {int(time_until_minutes)} минут")
+                        
+                except Exception as e:
+                    logger.warning(f"Ошибка обработки события {event}: {e}")
+                    continue
+            
+            return upcoming_events
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения предстоящих встреч: {e}")
+            return []
+
     async def test_api(self) -> bool:
         """
         Тестирует доступность и работоспособность API
@@ -248,7 +316,8 @@ class GoogleCalendarClient:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
                     self.api_url, 
-                    timeout=aiohttp.ClientTimeout(total=10)
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    allow_redirects=True
                 ) as response:
                     response.raise_for_status()
                     data = await response.json()

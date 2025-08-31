@@ -18,7 +18,7 @@ class Config:
     
     # Notification settings
     NOTIFICATION_MINUTES_BEFORE: int = int(os.getenv("NOTIFICATION_MINUTES_BEFORE", "30"))
-    CHECK_INTERVAL_MINUTES: int = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
+    CHECK_INTERVAL_MINUTES: int = int(os.getenv("CHECK_INTERVAL_MINUTES", "360"))  # 6 hours = 360 minutes
     
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
