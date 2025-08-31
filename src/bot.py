@@ -14,6 +14,7 @@ from .fireflies_client import FirefliesClient, Transcript
 from .slack_client import SlackBot
 from .calendar_integration import CalendarManager, CalendarEvent
 from .meeting_analyzer import MeetingAnalyzer
+from .google_calendar_integration import GoogleCalendarClient
 
 # Configure logging
 logging.basicConfig(
@@ -31,6 +32,14 @@ class FirefliesSummaryBot:
         self.slack_bot = SlackBot()
         self.calendar_manager = CalendarManager()
         self.meeting_analyzer = MeetingAnalyzer()
+        
+        # Add Google Apps Script calendar integration
+        try:
+            self.google_calendar_client = GoogleCalendarClient()
+            logger.info("✅ Google Apps Script Calendar integration initialized")
+        except Exception as e:
+            logger.warning(f"Google Apps Script Calendar not available: {e}")
+            self.google_calendar_client = None
         
         self.running = False
         self.check_task: Optional[asyncio.Task] = None
@@ -125,16 +134,45 @@ class FirefliesSummaryBot:
         logger.info("Checking for upcoming meetings...")
         
         try:
-            # Get events starting in the notification window
-            upcoming_events = await self.calendar_manager.get_events_starting_soon(
-                minutes_ahead=config.NOTIFICATION_MINUTES_BEFORE
-            )
+            # Get events from Google Apps Script calendar (preferred)
+            upcoming_events = []
+            if self.google_calendar_client and self.google_calendar_client.connection_ok:
+                try:
+                    upcoming_events = await self.google_calendar_client.get_meetings_starting_soon(
+                        minutes_ahead=config.NOTIFICATION_MINUTES_BEFORE
+                    )
+                    logger.info(f"Found {len(upcoming_events)} upcoming events from Google Apps Script")
+                except Exception as e:
+                    logger.error(f"Google Apps Script Calendar error: {e}")
+                    upcoming_events = []
             
-            logger.info(f"Found {len(upcoming_events)} upcoming events")
+            # Fallback to standard calendar if no events from Apps Script
+            if not upcoming_events:
+                try:
+                    standard_events = await self.calendar_manager.get_events_starting_soon(
+                        minutes_ahead=config.NOTIFICATION_MINUTES_BEFORE
+                    )
+                    # Convert to expected format
+                    upcoming_events = []
+                    for event in standard_events:
+                        upcoming_events.append({
+                            'id': event.id,
+                            'title': event.title,
+                            'startTime': event.start_time.isoformat(),
+                            'endTime': event.end_time.isoformat(),
+                            'attendees': [{'email': a} for a in event.attendees],
+                            'isRecurring': event.is_recurring,
+                            'seriesId': event.series_id,
+                            'meetingUrl': event.meeting_url
+                        })
+                    logger.info(f"Found {len(upcoming_events)} upcoming events from standard calendar")
+                except Exception as e:
+                    logger.error(f"Standard calendar error: {e}")
+                    upcoming_events = []
             
             for event in upcoming_events:
                 # Skip if we've already processed this event
-                event_key = f"{event.id}_{event.start_time.isoformat()}"
+                event_key = f"{event.get('id', 'unknown')}_{event.get('startTime', '')}"
                 if event_key in self.processed_events:
                     continue
                 
@@ -150,37 +188,49 @@ class FirefliesSummaryBot:
         except Exception as e:
             logger.error(f"Error checking upcoming meetings: {str(e)}", exc_info=True)
     
-    async def process_event(self, event: CalendarEvent):
+    async def process_event(self, event: Dict):
         """Process a calendar event and send summary if applicable."""
-        logger.info(f"Processing event: {event.title} at {event.start_time}")
+        logger.info(f"Processing event: {event.get('title', 'Untitled')} at {event.get('startTime', 'Unknown time')}")
         
         try:
+            # Try to find previous meeting using Google Apps Script first
+            previous_meeting_data = None
+            if self.google_calendar_client:
+                try:
+                    previous_meeting_data = await self.google_calendar_client.get_previous_meeting_in_series(
+                        event.get('title', '')
+                    )
+                except Exception as e:
+                    logger.error(f"Error getting previous meeting from Apps Script: {e}")
+            
+            # Then try to find transcript in Fireflies
             async with self.fireflies_client as client:
                 # Find previous meeting in the series
                 previous_transcript = await client.find_previous_meeting_in_series(
-                    meeting_title=event.title,
-                    meeting_date=event.start_time
+                    meeting_title=event.get('title', ''),
+                    meeting_date=datetime.fromisoformat(event.get('startTime', '').replace('Z', '+00:00'))
                 )
                 
                 if previous_transcript:
                     logger.info(f"Found previous meeting: {previous_transcript.title}")
                     
                     # Send summary to Slack
-                    await self.send_summary_to_slack(event, previous_transcript)
+                    await self.send_summary_to_slack(event, previous_transcript, previous_meeting_data)
                 else:
-                    logger.info(f"No previous meeting found for: {event.title}")
+                    logger.info(f"No previous meeting found for: {event.get('title', 'Untitled')}")
                     
                     # Optionally send a message that this is the first meeting
-                    if event.is_recurring:
+                    if event.get('isRecurring', False):
                         await self.send_first_meeting_notification(event)
         
         except Exception as e:
-            logger.error(f"Error processing event {event.id}: {str(e)}", exc_info=True)
+            logger.error(f"Error processing event {event.get('id', 'unknown')}: {str(e)}", exc_info=True)
     
     async def send_summary_to_slack(
         self,
-        event: CalendarEvent,
-        transcript: Transcript
+        event: Dict,
+        transcript: Transcript,
+        previous_meeting_data: Optional[Dict] = None
     ):
         """Send meeting summary to Slack."""
         try:
@@ -188,30 +238,36 @@ class FirefliesSummaryBot:
             channel = await self.determine_slack_channel(event)
             
             if not channel:
-                logger.warning(f"No Slack channel determined for event: {event.title}")
+                logger.warning(f"No Slack channel determined for event: {event.get('title', 'Untitled')}")
                 return
+            
+            # Parse meeting time
+            try:
+                meeting_time = datetime.fromisoformat(event.get('startTime', '').replace('Z', '+00:00'))
+            except:
+                meeting_time = datetime.now()
             
             # Send the summary
             message_ts = await self.slack_bot.send_meeting_summary(
                 channel=channel,
-                meeting_title=event.title,
-                meeting_time=event.start_time,
+                meeting_title=event.get('title', 'Untitled Meeting'),
+                meeting_time=meeting_time,
                 summary=transcript.summary or "No summary available",
                 action_items=transcript.action_items,
                 key_topics=transcript.key_topics,
                 participants=transcript.participants,
-                transcript_url=transcript.meeting_url
+                transcript_url=transcript.meeting_url or event.get('meetingUrl')
             )
             
             if message_ts:
-                logger.info(f"Summary sent to Slack channel {channel} for event: {event.title}")
+                logger.info(f"Summary sent to Slack channel {channel} for event: {event.get('title', 'Untitled')}")
             else:
-                logger.error(f"Failed to send summary to Slack for event: {event.title}")
+                logger.error(f"Failed to send summary to Slack for event: {event.get('title', 'Untitled')}")
         
         except Exception as e:
             logger.error(f"Error sending summary to Slack: {str(e)}", exc_info=True)
     
-    async def send_first_meeting_notification(self, event: CalendarEvent):
+    async def send_first_meeting_notification(self, event: Dict):
         """Send notification for first meeting in a series."""
         try:
             channel = await self.determine_slack_channel(event)
@@ -219,12 +275,19 @@ class FirefliesSummaryBot:
             if not channel:
                 return
             
+            # Parse meeting time
+            try:
+                meeting_time = datetime.fromisoformat(event.get('startTime', '').replace('Z', '+00:00'))
+                time_str = meeting_time.strftime('%I:%M %p')
+            except:
+                time_str = 'Unknown time'
+            
             blocks = [
                 {
                     "type": "header",
                     "text": {
                         "type": "plain_text",
-                        "text": f"📅 Upcoming Meeting: {event.title}"
+                        "text": f"📅 Upcoming Meeting: {event.get('title', 'Untitled')}"
                     }
                 },
                 {
@@ -232,7 +295,7 @@ class FirefliesSummaryBot:
                     "elements": [
                         {
                             "type": "mrkdwn",
-                            "text": f"*Starting in {config.NOTIFICATION_MINUTES_BEFORE} minutes* • {event.start_time.strftime('%I:%M %p')}"
+                            "text": f"*Starting in {config.NOTIFICATION_MINUTES_BEFORE} minutes* • {time_str}"
                         }
                     ]
                 },
@@ -245,39 +308,49 @@ class FirefliesSummaryBot:
                 }
             ]
             
-            if event.description:
+            if event.get('description'):
                 blocks.append({
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*Meeting Description:*\n{event.description[:500]}"
+                        "text": f"*Meeting Description:*\n{event.get('description', '')[:500]}"
                     }
                 })
             
-            if event.attendees:
-                attendees_text = ", ".join(event.attendees[:10])
-                blocks.append({
-                    "type": "context",
-                    "elements": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Attendees:* {attendees_text}"
-                        }
-                    ]
-                })
+            attendees = event.get('attendees', [])
+            if attendees:
+                # Handle both string and dict formats for attendees
+                attendee_names = []
+                for attendee in attendees:
+                    if isinstance(attendee, dict):
+                        attendee_names.append(attendee.get('email', attendee.get('name', 'Unknown')))
+                    else:
+                        attendee_names.append(str(attendee))
+                
+                if attendee_names:
+                    attendees_text = ", ".join(attendee_names[:10])
+                    blocks.append({
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "mrkdwn",
+                                "text": f"*Attendees:* {attendees_text}"
+                            }
+                        ]
+                    })
             
             await self.slack_bot.send_blocks(
                 channel=channel,
                 blocks=blocks,
-                text=f"First meeting notification for {event.title}"
+                text=f"First meeting notification for {event.get('title', 'Untitled')}"
             )
             
-            logger.info(f"First meeting notification sent for: {event.title}")
+            logger.info(f"First meeting notification sent for: {event.get('title', 'Untitled')}")
         
         except Exception as e:
             logger.error(f"Error sending first meeting notification: {str(e)}", exc_info=True)
     
-    async def determine_slack_channel(self, event: CalendarEvent) -> Optional[str]:
+    async def determine_slack_channel(self, event: Dict) -> Optional[str]:
         """Determine which Slack channel to send the summary to."""
         # For now, use the default channel
         # In the future, this could be based on:
@@ -286,7 +359,7 @@ class FirefliesSummaryBot:
         # - User preferences stored in a database
         
         # Try to find a channel based on the meeting title
-        title_lower = event.title.lower()
+        title_lower = event.get('title', '').lower()
         
         if "engineering" in title_lower or "dev" in title_lower:
             channel = "#engineering"
