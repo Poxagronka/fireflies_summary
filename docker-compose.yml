@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - FIREFLIES_API_KEY=${FIREFLIES_API_KEY}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}
+      - SLACK_CLIENT_SECRET=${SLACK_CLIENT_SECRET}
+      - NOTIFICATION_MINUTES_BEFORE=${NOTIFICATION_MINUTES_BEFORE:-30}
+      - CHECK_INTERVAL_MINUTES=${CHECK_INTERVAL_MINUTES:-5}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
